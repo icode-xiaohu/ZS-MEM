@@ -18,12 +18,12 @@ endif
 .c.o:
 		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) $< -o $@
 
+all:deps $(PROG)
+
 deps:
 		make -C bwa
 
-all:$(PROG)
-
-$(PROG):$(AOBJS) main.o
+$(PROG):$(AOBJS) main.o $(DEPOBJ) bwa/libbwa.a
 		$(CC) $(CFLAGS) $(DFLAGS) $(AOBJS) $(DEPOBJ) main.o -o $@ -Lbwa/ -lbwa $(LIBS)
 
 clean-zips:
@@ -35,3 +35,5 @@ clean:
 
 depend:
 	( LC_ALL=C ; export LC_ALL; makedepend -Y -- $(CFLAGS) $(DFLAGS) -- *.c )
+
+# DO NOT DELETE THIS LINE -- make depend depends on it.
