@@ -6,6 +6,9 @@
 #include "bwa/kvec.h"
 #include "bwa/utils.h"
 #include "bwa/ksort.h"
+#include "time_prof.h"
+
+extern double tprof[256][4];
 
 typedef kvec_t(int) int_v;
 
@@ -865,6 +868,7 @@ void mez_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 	int i;
 
 	ctime = cputime(); rtime = realtime();
+	tprof[TP_Z_SEEDING][0] = ctime; tprof[TP_Z_SEEDING][1] = rtime;
 	w.regs = malloc(n * sizeof(mem_alnreg_v));
 	w.opt = opt; w.bwt = bwt; w.bns = bns; w.pac = pac;
 	w.seqs = seqs; w.n_processed = n_processed;
@@ -937,8 +941,10 @@ void mez_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 		w.seq_seeds[i].a = malloc(64 * sizeof(mem_seed_t));
 	}
 	kt_for(opt->n_threads, mez_collect_seeds, &w, (opt->flag & MEM_F_PE) ? n >> 1 : n);
+	tprof[TP_Z_SEEDING][2] += cputime()-tprof[TP_Z_SEEDING][0]; tprof[TP_Z_SEEDING][3] += realtime()-tprof[TP_Z_SEEDING][1];
 
 	/* Chaining and SW */
+	tprof[TP_Z_DP][0] = cputime(); tprof[TP_Z_DP][1] = realtime();
 	kt_for(opt->n_threads, mez_worker1, &w, (opt->flag & MEM_F_PE) ? n >> 1 : n); // find mapping positions
 	if (opt->flag&MEM_F_PE) { // infer insert sizes if not provided
 		if (pes0) memcpy(pes, pes0, 4 * sizeof(mem_pestat_t)); // if pes0 != NULL, set the insert-size distribution as pes0
@@ -979,7 +985,7 @@ void mez_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 	}
 	free(w.aux);
 	free(w.regs);
-
+	tprof[TP_Z_DP][2] += cputime()-tprof[TP_Z_DP][0]; tprof[TP_Z_DP][3] += realtime()-tprof[TP_Z_DP][1];
 	if (bwa_verbose >= 3)
 		fprintf(stderr, "[M::%s] Processed %d reads in %.3f CPU sec, %.3f real sec\n", __func__, n, cputime() - ctime, realtime() - rtime);
 }
