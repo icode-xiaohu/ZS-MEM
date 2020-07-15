@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <math.h>
 #include <time.h>
+
 #ifdef HAVE_PTHREAD
 #include <pthread.h>
 #endif
@@ -238,64 +239,77 @@ void mem_print_chain(const bntseq_t *bns, mem_chain_v *chn)
 	}
 }
 
-mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, int len, const uint8_t *seq, void *buf)
+typedef kvec_t(mem_seed_t) mem_seed_v;
+
+typedef struct {
+	const mem_opt_t *opt;
+	const bwt_t *bwt;
+	const bntseq_t *bns;
+	const uint8_t *pac;
+	const mem_pestat_t *pes;
+	smem_aux_t **aux;
+	bseq1_t *seqs;
+	mem_seed_v *seeds;
+	mem_alnreg_v *regs;
+	int64_t n_processed;
+} worker_t;
+
+static void worker_seeding(void *data, int i, int tid) {
+	worker_t *w = (worker_t*) data;
+	smem_aux_t *aux = w->aux[tid];
+	const mem_opt_t *opt = w->opt;
+	const bwt_t *bwt = w->bwt;
+	int len = w->seqs[i].l_seq;
+	const uint8_t *seq = (uint8_t*) w->seqs[i].seq;
+	mem_seed_v *seeds = &w->seeds[tid];
+	seeds->n = 0; seeds->m = 512; seeds->a = malloc(512 * sizeof(mem_seed_t));
+	mem_collect_intv(opt, bwt, len, seq, aux);
+	for (i = 0; i < aux->mem.n; ++i) {
+		bwtintv_t *p = &aux->mem.a[i];
+		int step, count, slen = (uint32_t)p->info - (p->info>>32); // seed length
+		int64_t k;
+		step = p->x[2] > opt->max_occ? p->x[2] / opt->max_occ : 1;
+		for (k = count = 0; k < p->x[2] && count < opt->max_occ; k += step, ++count) {
+			mem_seed_t s;
+			s.rbeg = bwt_sa(bwt, p->x[0] + k); // this is the base coordinate in the forward-reverse reference
+			s.qbeg = p->info>>32;
+			s.score= s.len = slen;
+			kv_push(mem_seed_t, *seeds, s);
+		}
+	}
+}
+
+mem_chain_v mem_chain(const mem_opt_t *opt, const bntseq_t *bns, int len, const mem_seed_v *seeds)
 {
-	int i, b, e, l_rep;
+	int i;
 	int64_t l_pac = bns->l_pac;
 	mem_chain_v chain;
 	kbtree_t(chn) *tree;
-	smem_aux_t *aux;
 
 	kv_init(chain);
 	if (len < opt->min_seed_len) return chain; // if the query is shorter than the seed length, no match
 	tree = kb_init(chn, KB_DEFAULT_SIZE);
 
-	aux = buf? (smem_aux_t*)buf : smem_aux_init();
-
-	mem_collect_intv(opt, bwt, len, seq, aux);
-
-	/* compute frac_rep */
-	for (i = 0, b = e = l_rep = 0; i < aux->mem.n; ++i) {
-		bwtintv_t *p = &aux->mem.a[i];
-		int sb = (p->info>>32), se = (uint32_t)p->info;
-		if (p->x[2] <= opt->max_occ) continue;
-		if (sb > e) l_rep += e - b, b = sb, e = se;
-		else e = e > se? e : se;
-	}
-	l_rep += e - b;
-
 	/* chaining */
-	for (i = 0; i < aux->mem.n; ++i) {
-		bwtintv_t *p = &aux->mem.a[i];
-		int step, count, slen = (uint32_t)p->info - (p->info>>32); // seed length
-		int64_t k;
-		// if (slen < opt->min_seed_len) continue; // ignore if too short or too repetitive
-		step = p->x[2] > opt->max_occ? p->x[2] / opt->max_occ : 1;
-		for (k = count = 0; k < p->x[2] && count < opt->max_occ; k += step, ++count) {
-			mem_chain_t tmp, *lower, *upper;
-			mem_seed_t s;
-			int rid, to_add = 0;
-			s.rbeg = tmp.pos = bwt_sa(bwt, p->x[0] + k); // this is the base coordinate in the forward-reverse reference
-			s.qbeg = p->info>>32;
-			s.score= s.len = slen;
-			rid = bns_intv2rid(bns, s.rbeg, s.rbeg + s.len);
-			if (rid < 0) continue; // bridging multiple reference sequences or the forward-reverse boundary; TODO: split the seed; don't discard it!!!
-			if (kb_size(tree)) {
-				kb_intervalp(chn, tree, &tmp, &lower, &upper); // find the closest chain
-				if (!lower || !test_and_merge(opt, l_pac, lower, &s, rid)) to_add = 1;
-			} else to_add = 1;
-			if (to_add) { // add the seed as a new chain
-				tmp.n = 1; tmp.m = 4;
-				tmp.seeds = calloc(tmp.m, sizeof(mem_seed_t));
-				tmp.seeds[0] = s;
-				tmp.rid = rid;
-				/* is_alt只有1 bit，所以需要这样赋值 */
-				tmp.is_alt = !!bns->anns[rid].is_alt;
-				kb_putp(chn, tree, &tmp);
-			}
+	for(i = 0; i < seeds->n; i++) {
+		mem_chain_t tmp, *lower, *upper;
+		mem_seed_t *s = &seeds->a[i];
+		int rid, to_add = 0;
+		rid = bns_intv2rid(bns, s->rbeg, s->rbeg + s->len);
+		if (rid < 0) continue; // bridging multiple reference sequences or the forward-reverse boundary; TODO: split the seed; don't discard it!!!
+		if (kb_size(tree)) {
+			kb_intervalp(chn, tree, &tmp, &lower, &upper); // find the closest chain
+			if (!lower || !test_and_merge(opt, l_pac, lower, s, rid)) to_add = 1;
+		} else to_add = 1;
+		if (to_add) { // add the seed as a new chain
+			tmp.n = 1; tmp.m = 4;
+			tmp.seeds = calloc(tmp.m, sizeof(mem_seed_t));
+			tmp.seeds[0] = *s;
+			tmp.rid = rid;
+			tmp.is_alt = !!bns->anns[rid].is_alt;
+			kb_putp(chn, tree, &tmp);
 		}
 	}
-	if (buf == 0) smem_aux_destroy(aux);
 
 	kv_resize(mem_chain_t, chain, kb_size(tree));
 
@@ -303,10 +317,8 @@ mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 	__kb_traverse(mem_chain_t, tree, traverse_func);
 	#undef traverse_func
 
-	for (i = 0; i < chain.n; ++i) chain.a[i].frac_rep = (float)l_rep / len;
-	if (bwa_verbose >= 4) printf("* fraction of repetitive seeds: %.3f\n", (float)l_rep / len);
 	kb_destroy(chn, tree);
-
+	free(seeds->a);
 	return chain;
 }
 
@@ -1060,7 +1072,7 @@ void mem_reg2sam(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, 
 	}
 }
 
-mem_alnreg_v mem_align1_core(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int l_seq, char *seq, void *buf)
+mem_alnreg_v mem_align1_core(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int l_seq, char *seq, void *buf, const mem_seed_v *seeds)
 {
 	int i;
 	mem_chain_v chn;
@@ -1069,7 +1081,7 @@ mem_alnreg_v mem_align1_core(const mem_opt_t *opt, const bwt_t *bwt, const bntse
 	for (i = 0; i < l_seq; ++i) // convert to 2-bit encoding if we have not done so
 		seq[i] = seq[i] < 4? seq[i] : nst_nt4_table[(int)seq[i]];
 
-	chn = mem_chain(opt, bwt, bns, l_seq, (uint8_t*)seq, buf);
+	chn = mem_chain(opt, bns, l_seq, seeds);
 
 	chn.n = mem_chain_flt(opt, chn.n, chn.a);
 
@@ -1182,29 +1194,18 @@ mem_aln_t mem_reg2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *
 	return a;
 }
 
-typedef struct {
-	const mem_opt_t *opt;
-	const bwt_t *bwt;
-	const bntseq_t *bns;
-	const uint8_t *pac;
-	const mem_pestat_t *pes;
-	smem_aux_t **aux;
-	bseq1_t *seqs;
-	mem_alnreg_v *regs;
-	int64_t n_processed;
-} worker_t;
 
 static void worker1(void *data, int i, int tid)
 {
 	worker_t *w = (worker_t*)data;
 	if (!(w->opt->flag&MEM_F_PE)) {
 		if (bwa_verbose >= 4) printf("=====> Processing read '%s' <=====\n", w->seqs[i].name);
-		w->regs[i] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i].l_seq, w->seqs[i].seq, w->aux[tid]);
+		w->regs[i] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i].l_seq, w->seqs[i].seq, w->aux[tid], &w->seeds[i]);
 	} else {
 		if (bwa_verbose >= 4) printf("=====> Processing read '%s'/1 <=====\n", w->seqs[i<<1|0].name);
-		w->regs[i<<1|0] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i<<1|0].l_seq, w->seqs[i<<1|0].seq, w->aux[tid]);
+		w->regs[i<<1|0] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i<<1|0].l_seq, w->seqs[i<<1|0].seq, w->aux[tid], &w->seeds[i]);
 		if (bwa_verbose >= 4) printf("=====> Processing read '%s'/2 <=====\n", w->seqs[i<<1|1].name);
-		w->regs[i<<1|1] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i<<1|1].l_seq, w->seqs[i<<1|1].seq, w->aux[tid]);
+		w->regs[i<<1|1] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i<<1|1].l_seq, w->seqs[i<<1|1].seq, w->aux[tid], &w->seeds[i]);
 	}
 }
 
@@ -1226,6 +1227,10 @@ static void worker2(void *data, int i, int tid)
 	}
 }
 
+
+extern double mem_time_seeding[4];
+extern double mem_time_DP[4];
+
 void mem_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int64_t n_processed, int n, bseq1_t *seqs, const mem_pestat_t *pes0)
 {
 	extern void kt_for(int n_threads, void (*func)(void*,int,int), void *data, int n);
@@ -1235,6 +1240,7 @@ void mem_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 	int i;
 
 	ctime = cputime(); rtime = realtime();
+	mem_time_seeding[0] = ctime; mem_time_seeding[1] = rtime;
 	global_bns = bns;
 	w.regs = malloc(n * sizeof(mem_alnreg_v));
 	w.opt = opt; w.bwt = bwt; w.bns = bns; w.pac = pac;
@@ -1245,7 +1251,13 @@ void mem_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 	for (i = 0; i < opt->n_threads; ++i) {
 		w.aux[i] = smem_aux_init();
 	}
+	w.seeds = malloc(n * sizeof(mem_seed_v));
+	kt_for(opt->n_threads, worker_seeding, &w, (opt->flag & MEM_F_PE) ? n >> 1 : n); // Seeding
+	mem_time_seeding[2] += cputime() - ctime; mem_time_seeding[3] += realtime() - rtime;
+
+	mem_time_DP[0] = cputime(); mem_time_DP[1] = realtime();
 	kt_for(opt->n_threads, worker1, &w, (opt->flag & MEM_F_PE) ? n >> 1 : n); // find mapping positions
+	free(w.seeds);
 	for (i = 0; i < opt->n_threads; ++i) {
 		smem_aux_destroy(w.aux[i]);
 	}
@@ -1256,6 +1268,7 @@ void mem_process_seqs(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 	}
 	kt_for(opt->n_threads, worker2, &w, (opt->flag&MEM_F_PE)? n>>1 : n); // generate alignment
 	free(w.regs);
+	mem_time_DP[2] += cputime() - mem_time_DP[0]; mem_time_DP[3] += realtime() - mem_time_DP[1];
 	if (bwa_verbose >= 3)
 		fprintf(stderr, "[M::%s] Processed %d reads in %.3f CPU sec, %.3f real sec\n", __func__, n, cputime() - ctime, realtime() - rtime);
 }

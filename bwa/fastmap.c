@@ -12,6 +12,7 @@
 #include "utils.h"
 #include "bntseq.h"
 #include "kseq.h"
+
 KSEQ_DECLARE(gzFile)
 
 extern unsigned char nst_nt4_table[256];
@@ -111,6 +112,9 @@ static void update_a(mem_opt_t *opt, const mem_opt_t *opt0)
 		if (!opt0->pen_unpaired) opt->pen_unpaired *= opt->a;
 	}
 }
+
+double mem_time_seeding[4];
+double mem_time_DP[4];
 
 int main_mem(int argc, char *argv[])
 {
@@ -358,7 +362,11 @@ int main_mem(int argc, char *argv[])
 	bwa_print_sam_hdr(aux.idx->bns, hdr_line);
 	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
 
+	double mapping_tc = cputime(), mapping_tr = realtime();
+	memset(mem_time_seeding, 0, sizeof(mem_time_seeding));
+	memset(mem_time_DP, 0, sizeof(mem_time_DP));
 	kt_pipeline(no_mt_io? 1 : 2, process, &aux, 3);
+	mapping_tc = cputime()-mapping_tc; mapping_tr = realtime()-mapping_tr;
 
 	free(hdr_line);
 	free(opt);
@@ -369,6 +377,13 @@ int main_mem(int argc, char *argv[])
 		kseq_destroy(aux.ks2);
 		err_gzclose(fp2); kclose(ko2);
 	}
+
+	fprintf(stderr, "Time profiling\n");
+	fprintf(stderr, "    Overall mapping: %.2f CPU sec; %.2f real sec\n", mapping_tc, mapping_tr);
+	fprintf(stderr, "    Seeding:         %.2f CPU sec; %.2f real sec\n", mem_time_seeding[2], mem_time_seeding[3]);
+	fprintf(stderr, "    Non-seeding:     %.2f CPU sec; %.2f real sec\n", mem_time_DP[2], mem_time_DP[3]);
+	fprintf(stderr, "\n");
+
 	return 0;
 }
 

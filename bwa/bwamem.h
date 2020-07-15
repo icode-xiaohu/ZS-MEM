@@ -77,7 +77,9 @@ typedef struct {
 	int max_XA_hits, max_XA_hits_alt; // if there are max_hits or fewer, output them all
 	int8_t mat[25];         // scoring matrix; mat[0] == 0 if unset
 
+	// zip-seeding options
 	int min_reads;
+	double max_mis;
 } mem_opt_t;
 
 typedef struct {
@@ -117,7 +119,7 @@ typedef struct { // This struct is only used for the convenience of API.
 	uint32_t *cigar; // CIGAR in the BAM encoding: opLen<<4|op; op to integer mapping: MIDSH=>01234
 	char *XA;        // alternative mappings
 
-	int score; // QUE: 等于aligned region的best-local-SW-score？
+	int score;
 	int sub; // 2nd-best/sub-optimal SW score
 	int alt_sc;
 } mem_aln_t;
@@ -206,7 +208,6 @@ extern "C" {
 	 */
 	void mem_pestat(const mem_opt_t *opt, int64_t l_pac, int n, const mem_alnreg_v *regs, mem_pestat_t pes[4]);
 
-	/* 为BWA-MEZ开放接口 */
 	int test_and_merge(const mem_opt_t *opt, int64_t l_pac, mem_chain_t *c, const mem_seed_t *p, int seed_rid);
 	int mem_chain_flt(const mem_opt_t *opt, int n_chn, mem_chain_t *a);
 	void mem_flt_chained_seeds(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, int l_query, const uint8_t *query, int n_chn, mem_chain_t *a);
@@ -217,7 +218,6 @@ extern "C" {
 	void mem_reorder_primary5(int T, mem_alnreg_v *a);
 	void mem_reg2sam(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, bseq1_t *s, mem_alnreg_v *a, int extra_flag, const mem_aln_t *m);
 //	mem_alnreg_v mem_align1_core(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int l_seq, char *seq, void *buf);
-	/* mem_reg2aln在上面 */
 	void mem_aln2sam(const mem_opt_t *opt, const bntseq_t *bns, kstring_t *str, bseq1_t *s, int n, const mem_aln_t *list, int which, const mem_aln_t *m_);
 
 
