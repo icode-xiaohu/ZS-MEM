@@ -1,6 +1,6 @@
 # ZS-MEM: Zip-Seeding implemented in BWA-MEM
 Zip-seeding is a compressive seeding strategy based on reordering-based compression.
-ZS-MEM is the incorporation of zip-seeding and BWA-MEM. It takes the reordering reads(FASTQ/FASTA) as input,
+ZS-MEM is the incorporation of zip-seeding and BWA-MEM. It takes the reordered reads(FASTQ/FASTA) as input,
 and outputs mapping alignments in SAM format.
 
 ## Download and install
